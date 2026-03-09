@@ -31,3 +31,15 @@ jobs:
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           RUN_NOW:        "true"
         run: python bin_checker.py
+
+      - name: Upload debug artifacts
+        if: always()   # Upload even if the step above fails
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: |
+            debug_after_search.png
+            debug_after_select.png
+            debug_page.html
+            debug_page_after_select.html
+          if-no-files-found: ignore
