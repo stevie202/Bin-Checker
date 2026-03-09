@@ -102,8 +102,3 @@ if __name__ == "__main__":
         while True:
             schedule.run_pending()
             time.sleep(30)
-```
-
-After pasting into GitHub and committing, check the raw URL to confirm it took:
-```
-https://raw.githubusercontent.com/YOUR_USERNAME/Bin-Checker/main/bin_checker.py
