@@ -115,3 +115,4 @@ An HTML email every Tuesday evening like:
 | Email not sending | Check App Password, ensure "Less secure app" not needed |
 | Address not found | Check `ADDRESS_SEARCH` matches the site's format |
 | Bins show "Unknown" | The site HTML may have changed — open an issue |
+# updated
