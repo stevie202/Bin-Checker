@@ -1,0 +1,33 @@
+name: Bin Collection Checker
+
+on:
+  schedule:
+    - cron: '30 18 * * 2'  # Every Tuesday at 18:30 UTC (GMT)
+  workflow_dispatch:        # Allow manual trigger for testing
+
+jobs:
+  check-bins:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install playwright schedule
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: Run bin checker
+        env:
+          EMAIL_FROM:     ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO:       ${{ secrets.EMAIL_TO }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          RUN_NOW:        "true"
+        run: python bin_checker.py
