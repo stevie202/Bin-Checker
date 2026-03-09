@@ -30,73 +30,42 @@ def fetch_bin_info():
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
-        # Block cookie/analytics scripts to speed up load
-        page.route("**/*clarity*", lambda r: r.abort())
-        page.route("**/*facebook*", lambda r: r.abort())
-        page.route("**/*googletagmanager*", lambda r: r.abort())
-
         page.goto(COUNCIL_URL, wait_until="networkidle", timeout=60_000)
         log.info("Page loaded.")
 
-        # Wait up to 30s for ANY text input to appear (Liferay loads widgets late)
-        log.info("Waiting for search input to appear...")
+        # -- Dismiss cookie banner
         try:
-            page.wait_for_selector("input[type='text']", timeout=30_000)
-            log.info("Search input appeared.")
+            accept_btn = page.locator("button:has-text('I Accept Cookies')").first
+            accept_btn.wait_for(state="visible", timeout=8_000)
+            accept_btn.click()
+            log.info("Dismissed cookie banner.")
+            page.wait_for_timeout(1_500)
         except PWTimeout:
-            log.warning("No text input appeared after 30s - dumping page state")
-            page.screenshot(path="debug_initial.png", full_page=True)
-            with open("debug_initial.html", "w", encoding="utf-8") as f:
-                f.write(page.content())
-            raise RuntimeError("Search input never appeared - check debug_initial.html")
+            log.info("No cookie banner found, continuing.")
 
-        # Log all inputs now visible
-        inputs = page.locator("input").all()
-        log.info(f"Total inputs found: {len(inputs)}")
-        for i, inp in enumerate(inputs):
-            log.info(f"  [{i}] type={inp.get_attribute('type')} "
-                     f"id={inp.get_attribute('id')} "
-                     f"name={inp.get_attribute('name')} "
-                     f"placeholder={inp.get_attribute('placeholder')}")
+        # -- Wait for search input
+        log.info("Waiting for search input...")
+        page.wait_for_selector("input[type='text']", timeout=20_000)
+        log.info("Search input found.")
 
-        # Save debug screenshot after full load
-        page.screenshot(path="debug_initial.png", full_page=True)
-        with open("debug_initial.html", "w", encoding="utf-8") as f:
-            f.write(page.content())
-        log.info("Saved debug_initial.png and debug_initial.html")
-
-        # Find and fill the search box
+        # -- Fill in address
         search_input = page.locator("input[type='text']").first
         search_input.click()
         search_input.fill(ADDRESS_SEARCH)
         log.info(f"Typed: {ADDRESS_SEARCH}")
-        page.wait_for_timeout(1_500)
+        page.wait_for_timeout(2_000)
 
-        # Try submit button, fall back to Enter
-        try:
-            btn = page.locator(
-                "button[type='submit'], button:has-text('Search'), "
-                "button:has-text('Find'), input[type='submit']"
-            ).first
-            btn.click()
-            log.info("Clicked submit button.")
-        except Exception:
-            search_input.press("Enter")
-            log.info("Pressed Enter.")
-
-        page.wait_for_timeout(3_000)
-
-        # Save post-search debug
+        # -- Save debug screenshot after typing
         page.screenshot(path="debug_after_search.png", full_page=True)
         with open("debug_after_search.html", "w", encoding="utf-8") as f:
             f.write(page.content())
 
         body_text = page.locator("body").inner_text()
-        log.info("=== PAGE TEXT AFTER SEARCH (first 2000 chars) ===")
+        log.info("=== PAGE TEXT AFTER TYPING (first 2000 chars) ===")
         log.info(body_text[:2000])
         log.info("==================================================")
 
-        # Try to find address result dropdown
+        # -- Look for address suggestions
         result_selectors = [
             "[class*='autocomplete'] li",
             "[class*='suggestion']",
@@ -108,6 +77,7 @@ def fetch_bin_info():
             "ul li[data-value]",
             ".address-list li",
             "select option:not([value=''])",
+            "li[class*='item']",
         ]
 
         result_locator = None
@@ -120,18 +90,31 @@ def fetch_bin_info():
             except PWTimeout:
                 continue
 
+        # -- If no dropdown, try pressing Enter/clicking Search button
         if not result_locator:
-            log.warning("Could not find address dropdown. Page text:")
-            log.warning(body_text[:3000])
-            raise RuntimeError("Could not find address results - check debug_after_search.html artifact")
+            log.info("No dropdown found, trying Enter key...")
+            search_input.press("Enter")
+            page.wait_for_timeout(3_000)
+
+            for sel in result_selectors:
+                try:
+                    page.wait_for_selector(sel, timeout=5_000)
+                    result_locator = page.locator(sel).first
+                    log.info(f"Found result after Enter with selector: {sel}")
+                    break
+                except PWTimeout:
+                    continue
+
+        if not result_locator:
+            page.screenshot(path="debug_after_search.png", full_page=True)
+            raise RuntimeError("Could not find address results - check debug_after_search.html")
 
         result_text = result_locator.inner_text()
         log.info(f"Clicking result: {result_text.strip()}")
         result_locator.click()
-
         page.wait_for_timeout(4_000)
 
-        # Save post-selection debug
+        # -- Save post-selection debug
         page.screenshot(path="debug_after_select.png", full_page=True)
         with open("debug_after_select.html", "w", encoding="utf-8") as f:
             f.write(page.content())
