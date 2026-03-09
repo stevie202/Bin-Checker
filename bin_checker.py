@@ -45,7 +45,7 @@ def fetch_bin_info():
             log.info("No cookie banner.")
 
         # Get the isl-fusion iframe
-        frame = page.frame(url=f"**{IFRAME_URL}**") or page.frame(name="iFrameResizer0")
+        frame = page.frame(url="**lisburn.isl-fusion.com**") or page.frame(name="iFrameResizer0")
         if not frame:
             raise RuntimeError("Could not find isl-fusion iframe")
         log.info(f"Found iframe: {frame.url}")
@@ -58,7 +58,7 @@ def fetch_bin_info():
         log.info(f"Typed: {ADDRESS_SEARCH}")
         page.wait_for_timeout(2_000)
 
-        # Click the Search button inside the iframe
+        # Click Search button
         try:
             search_btn = frame.locator("button:has-text('Search'), input[type='submit'], button[type='submit']").first
             search_btn.click()
@@ -69,22 +69,16 @@ def fetch_bin_info():
 
         page.wait_for_timeout(3_000)
 
-        # Look for address result inside iframe
-        result_selectors = [
-            "a", "li", "[class*='result']", "[class*='address']",
-            "[class*='suggestion']", "[role='option']",
-        ]
-
+        # Find address result link inside iframe
         result_locator = None
-        for sel in result_selectors:
+        for sel in ["a", "li", "[class*='result']", "[class*='address']"]:
             try:
                 frame.wait_for_selector(sel, timeout=4_000)
-                candidates = frame.locator(sel).all()
-                for c in candidates:
+                for c in frame.locator(sel).all():
                     text = c.inner_text().strip()
                     if "redhill" in text.lower():
                         result_locator = c
-                        log.info(f"Found address result '{text}' with: {sel}")
+                        log.info(f"Found result '{text}' with: {sel}")
                         break
                 if result_locator:
                     break
@@ -106,10 +100,8 @@ def fetch_bin_info():
             f.write(frame.content())
 
         content = frame.locator("body").inner_text()
-        log.info("=== IFRAME TEXT AFTER SELECTION ===")
-        log.info(content[:2000])
-        log.info("====================================")
-
+        log.info("=== IFRAME TEXT ===")
+        log.info(content[:1000])
         browser.close()
 
     return _parse_bin_info(content, result_text)
@@ -117,32 +109,33 @@ def fetch_bin_info():
 
 def _parse_bin_info(content, address):
     """
-    Expected format after 'Next Collections':
+    Actual page format:
+        Next Collections
         Wednesday 11th March
-        BrownBin
-        RecycleBin
+         BrownBin  RecycleBin        <- bins on same line, space-separated
         Wednesday 18th March
-        ResidualBin
-    We want only the FIRST date block.
+         ResidualBin
     """
     result = {"address": address, "date": "Unknown", "bins": []}
-
     lines = [l.strip() for l in content.splitlines() if l.strip()]
 
-    # Find 'Next Collections' and parse what follows
-    date_pattern = re.compile(r"^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday).+\d{4}$", re.IGNORECASE)
-    bin_pattern  = re.compile(r"^(BrownBin|RecycleBin|ResidualBin)$", re.IGNORECASE)
+    date_re = re.compile(
+        r"^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s+\d{1,2}\w*\s+\w+",
+        re.IGNORECASE
+    )
+    bin_names = ["BrownBin", "RecycleBin", "ResidualBin"]
 
+    # Find 'Next Collections' marker
     try:
         start = next(i for i, l in enumerate(lines) if "Next Collections" in l)
     except StopIteration:
         log.warning("'Next Collections' not found in page text")
         return result
 
-    # First date line after 'Next Collections'
+    # Find first date line after marker
     first_date_idx = None
     for i in range(start + 1, len(lines)):
-        if date_pattern.match(lines[i]):
+        if date_re.match(lines[i]):
             first_date_idx = i
             result["date"] = lines[i]
             break
@@ -151,12 +144,13 @@ def _parse_bin_info(content, address):
         log.warning("No date found after 'Next Collections'")
         return result
 
-    # Collect bin names immediately following the first date, until next date or end
-    for i in range(first_date_idx + 1, len(lines)):
-        if date_pattern.match(lines[i]):
-            break  # hit the next collection date, stop
-        if bin_pattern.match(lines[i]):
-            result["bins"].append(lines[i])
+    # Collect bins from lines immediately after the date, until the next date line
+    for i in range(first_date_idx + 1, min(first_date_idx + 5, len(lines))):
+        if date_re.match(lines[i]):
+            break
+        for b in bin_names:
+            if b.lower() in lines[i].lower() and b not in result["bins"]:
+                result["bins"].append(b)
 
     log.info(f"Parsed -> date: {result['date']}, bins: {result['bins']}")
     return result
@@ -168,7 +162,6 @@ def send_email(info):
         f"<li style='padding:4px 0;font-size:1.1em;'>{get_bin_emoji(b)} <strong>{b}</strong></li>"
         for b in info["bins"]
     ) or "<li>Could not determine bin type -- check website manually.</li>"
-
     html_body = f"""
     <html><body style="font-family:Arial,sans-serif;max-width:500px;margin:0 auto;padding:20px;">
       <h2 style="color:#2d6a4f;">Bin Collection Reminder</h2>
