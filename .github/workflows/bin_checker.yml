@@ -2,8 +2,8 @@ name: Bin Collection Checker
 
 on:
   schedule:
-    - cron: '30 18 * * 2'  # Every Tuesday at 18:30 UTC (GMT)
-  workflow_dispatch:        # Allow manual trigger for testing
+    - cron: '30 18 * * 2'
+  workflow_dispatch:
 
 jobs:
   check-bins:
@@ -33,13 +33,15 @@ jobs:
         run: python bin_checker.py
 
       - name: Upload debug artifacts
-        if: always()   # Upload even if the step above fails
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: debug-screenshots
           path: |
+            debug_initial.png
+            debug_initial.html
             debug_after_search.png
+            debug_after_search.html
             debug_after_select.png
-            debug_page.html
-            debug_page_after_select.html
+            debug_after_select.html
           if-no-files-found: ignore

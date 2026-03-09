@@ -29,30 +29,149 @@ def fetch_bin_info():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
-        page.goto(COUNCIL_URL, wait_until="networkidle", timeout=30_000)
+
+        # Block cookie/analytics scripts to speed up load
+        page.route("**/*clarity*", lambda r: r.abort())
+        page.route("**/*facebook*", lambda r: r.abort())
+        page.route("**/*googletagmanager*", lambda r: r.abort())
+
+        page.goto(COUNCIL_URL, wait_until="networkidle", timeout=60_000)
         log.info("Page loaded.")
 
-        # Log ALL inputs found on page
+        # Wait up to 30s for ANY text input to appear (Liferay loads widgets late)
+        log.info("Waiting for search input to appear...")
+        try:
+            page.wait_for_selector("input[type='text']", timeout=30_000)
+            log.info("Search input appeared.")
+        except PWTimeout:
+            log.warning("No text input appeared after 30s - dumping page state")
+            page.screenshot(path="debug_initial.png", full_page=True)
+            with open("debug_initial.html", "w", encoding="utf-8") as f:
+                f.write(page.content())
+            raise RuntimeError("Search input never appeared - check debug_initial.html")
+
+        # Log all inputs now visible
         inputs = page.locator("input").all()
         log.info(f"Total inputs found: {len(inputs)}")
         for i, inp in enumerate(inputs):
-            log.info(f"  [{i}] type={inp.get_attribute('type')} id={inp.get_attribute('id')} name={inp.get_attribute('name')} placeholder={inp.get_attribute('placeholder')}")
+            log.info(f"  [{i}] type={inp.get_attribute('type')} "
+                     f"id={inp.get_attribute('id')} "
+                     f"name={inp.get_attribute('name')} "
+                     f"placeholder={inp.get_attribute('placeholder')}")
 
-        # Log full page HTML
-        html = page.content()
-        log.info("=== PAGE HTML (first 3000 chars) ===")
-        log.info(html[:3000])
-        log.info("=====================================")
-
-        # Save debug files
+        # Save debug screenshot after full load
         page.screenshot(path="debug_initial.png", full_page=True)
         with open("debug_initial.html", "w", encoding="utf-8") as f:
-            f.write(html)
+            f.write(page.content())
         log.info("Saved debug_initial.png and debug_initial.html")
+
+        # Find and fill the search box
+        search_input = page.locator("input[type='text']").first
+        search_input.click()
+        search_input.fill(ADDRESS_SEARCH)
+        log.info(f"Typed: {ADDRESS_SEARCH}")
+        page.wait_for_timeout(1_500)
+
+        # Try submit button, fall back to Enter
+        try:
+            btn = page.locator(
+                "button[type='submit'], button:has-text('Search'), "
+                "button:has-text('Find'), input[type='submit']"
+            ).first
+            btn.click()
+            log.info("Clicked submit button.")
+        except Exception:
+            search_input.press("Enter")
+            log.info("Pressed Enter.")
+
+        page.wait_for_timeout(3_000)
+
+        # Save post-search debug
+        page.screenshot(path="debug_after_search.png", full_page=True)
+        with open("debug_after_search.html", "w", encoding="utf-8") as f:
+            f.write(page.content())
+
+        body_text = page.locator("body").inner_text()
+        log.info("=== PAGE TEXT AFTER SEARCH (first 2000 chars) ===")
+        log.info(body_text[:2000])
+        log.info("==================================================")
+
+        # Try to find address result dropdown
+        result_selectors = [
+            "[class*='autocomplete'] li",
+            "[class*='suggestion']",
+            "[class*='result'] li",
+            "[class*='dropdown'] li",
+            "[role='listbox'] [role='option']",
+            "[role='option']",
+            "ul[class*='address'] li",
+            "ul li[data-value]",
+            ".address-list li",
+            "select option:not([value=''])",
+        ]
+
+        result_locator = None
+        for sel in result_selectors:
+            try:
+                page.wait_for_selector(sel, timeout=5_000)
+                result_locator = page.locator(sel).first
+                log.info(f"Found result with selector: {sel}")
+                break
+            except PWTimeout:
+                continue
+
+        if not result_locator:
+            log.warning("Could not find address dropdown. Page text:")
+            log.warning(body_text[:3000])
+            raise RuntimeError("Could not find address results - check debug_after_search.html artifact")
+
+        result_text = result_locator.inner_text()
+        log.info(f"Clicking result: {result_text.strip()}")
+        result_locator.click()
+
+        page.wait_for_timeout(4_000)
+
+        # Save post-selection debug
+        page.screenshot(path="debug_after_select.png", full_page=True)
+        with open("debug_after_select.html", "w", encoding="utf-8") as f:
+            f.write(page.content())
+
+        content = page.locator("body").inner_text()
+        log.info("=== PAGE TEXT AFTER SELECTION (first 2000 chars) ===")
+        log.info(content[:2000])
+        log.info("=====================================================")
 
         browser.close()
 
-    return {"address": ADDRESS_SEARCH, "date": "DEBUG RUN - check logs", "bins": []}
+    return _parse_bin_info(content, result_text.strip())
+
+def _parse_bin_info(content, address):
+    result = {"address": address, "date": "Unknown", "bins": []}
+    date_pattern = re.compile(
+        r"(Wednesday[\s,]+\d{1,2}\s+\w+\s+\d{4}|"
+        r"Wed\s+\d{1,2}\s+\w+\s+\d{4}|"
+        r"\d{1,2}\s+\w+\s+\d{4})",
+        re.IGNORECASE
+    )
+    for line in content.splitlines():
+        m = date_pattern.search(line)
+        if m:
+            result["date"] = m.group(0).strip()
+            break
+    bin_keywords = {
+        "BrownBin":    ["brown bin", "brownbin", "brown"],
+        "RecycleBin":  ["recycle bin", "recyclebin", "recycling bin", "blue bin"],
+        "ResidualBin": ["residual bin", "residualbin", "general waste", "black bin", "residual"],
+    }
+    content_lower = content.lower()
+    for bin_name, keywords in bin_keywords.items():
+        for kw in keywords:
+            if kw in content_lower:
+                result["bins"].append(bin_name)
+                break
+    result["bins"] = list(dict.fromkeys(result["bins"]))
+    log.info(f"Parsed -> date: {result['date']}, bins: {result['bins']}")
+    return result
 
 def send_email(info):
     today = datetime.now().strftime("%A %d %B %Y")
