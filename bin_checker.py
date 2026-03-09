@@ -26,46 +26,109 @@ def get_bin_emoji(name):
 
 def fetch_bin_info():
     log.info("Launching browser...")
+    captured_requests = []
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+        context = browser.new_context()
+        page = context.new_page()
+
+        # Intercept all network requests to find the underlying API
+        def handle_request(request):
+            url = request.url
+            if any(kw in url.lower() for kw in ["bin", "address", "uprn", "collect", "waste", "search"]):
+                log.info(f"INTERCEPTED: {request.method} {url}")
+                captured_requests.append(url)
+
+        def handle_response(response):
+            url = response.url
+            if any(kw in url.lower() for kw in ["bin", "address", "uprn", "collect", "waste", "search"]):
+                log.info(f"RESPONSE {response.status}: {url}")
+
+        page.on("request", handle_request)
+        page.on("response", handle_response)
 
         page.goto(COUNCIL_URL, wait_until="networkidle", timeout=60_000)
         log.info("Page loaded.")
 
-        # -- Dismiss cookie banner
+        # Dismiss cookie banner
         try:
             accept_btn = page.locator("button:has-text('I Accept Cookies')").first
             accept_btn.wait_for(state="visible", timeout=8_000)
             accept_btn.click()
             log.info("Dismissed cookie banner.")
-            page.wait_for_timeout(1_500)
+            page.wait_for_timeout(2_000)
         except PWTimeout:
-            log.info("No cookie banner found, continuing.")
+            log.info("No cookie banner.")
 
-        # -- Wait for search input
-        log.info("Waiting for search input...")
-        page.wait_for_selector("input[type='text']", timeout=20_000)
-        log.info("Search input found.")
+        # Log all frames
+        frames = page.frames
+        log.info(f"Total frames: {len(frames)}")
+        for i, frame in enumerate(frames):
+            log.info(f"  Frame [{i}]: url={frame.url} name={frame.name}")
 
-        # -- Fill in address
-        search_input = page.locator("input[type='text']").first
-        search_input.click()
-        search_input.fill(ADDRESS_SEARCH)
-        log.info(f"Typed: {ADDRESS_SEARCH}")
-        page.wait_for_timeout(2_000)
+        # Try to find input in ALL frames including main
+        search_input = None
+        search_frame = None
+        for frame in page.frames:
+            try:
+                inp = frame.locator("input[type='text'], input:not([type='hidden']):not([type='checkbox']):not([type='radio'])").first
+                inp.wait_for(state="visible", timeout=3_000)
+                search_input = inp
+                search_frame = frame
+                log.info(f"Found input in frame: {frame.url}")
+                break
+            except PWTimeout:
+                continue
 
-        # -- Save debug screenshot after typing
+        # Also try shadow DOM via JavaScript
+        if not search_input:
+            log.info("Trying JavaScript to find input in shadow DOM...")
+            result = page.evaluate("""
+                () => {
+                    function findInputs(root) {
+                        let inputs = Array.from(root.querySelectorAll('input[type="text"]'));
+                        root.querySelectorAll('*').forEach(el => {
+                            if (el.shadowRoot) inputs = inputs.concat(findInputs(el.shadowRoot));
+                        });
+                        return inputs.map(i => ({
+                            id: i.id, name: i.name, placeholder: i.placeholder,
+                            type: i.type, className: i.className
+                        }));
+                    }
+                    return findInputs(document);
+                }
+            """)
+            log.info(f"Shadow DOM inputs found: {result}")
+
+        # Save full debug screenshot
         page.screenshot(path="debug_after_search.png", full_page=True)
         with open("debug_after_search.html", "w", encoding="utf-8") as f:
             f.write(page.content())
 
+        if not search_input:
+            log.info(f"Captured API requests so far: {captured_requests}")
+            raise RuntimeError("Could not find search input in any frame or shadow DOM - check artifacts")
+
+        # Type address and wait for suggestions
+        search_input.click()
+        search_input.fill(ADDRESS_SEARCH)
+        log.info(f"Typed: {ADDRESS_SEARCH}")
+        page.wait_for_timeout(3_000)
+
+        # Log intercepted requests after typing
+        log.info(f"API requests captured after typing: {captured_requests}")
+
+        # Save post-type screenshot
+        page.screenshot(path="debug_after_type.png", full_page=True)
+        with open("debug_after_type.html", "w", encoding="utf-8") as f:
+            f.write(page.content() if search_frame == page.main_frame else search_frame.content())
+
         body_text = page.locator("body").inner_text()
         log.info("=== PAGE TEXT AFTER TYPING (first 2000 chars) ===")
         log.info(body_text[:2000])
-        log.info("==================================================")
 
-        # -- Look for address suggestions
+        # Find result dropdown
         result_selectors = [
             "[class*='autocomplete'] li",
             "[class*='suggestion']",
@@ -73,48 +136,35 @@ def fetch_bin_info():
             "[class*='dropdown'] li",
             "[role='listbox'] [role='option']",
             "[role='option']",
-            "ul[class*='address'] li",
-            "ul li[data-value]",
-            ".address-list li",
+            "ul li",
             "select option:not([value=''])",
             "li[class*='item']",
         ]
 
         result_locator = None
         for sel in result_selectors:
-            try:
-                page.wait_for_selector(sel, timeout=5_000)
-                result_locator = page.locator(sel).first
-                log.info(f"Found result with selector: {sel}")
-                break
-            except PWTimeout:
-                continue
-
-        # -- If no dropdown, try pressing Enter/clicking Search button
-        if not result_locator:
-            log.info("No dropdown found, trying Enter key...")
-            search_input.press("Enter")
-            page.wait_for_timeout(3_000)
-
-            for sel in result_selectors:
+            for frame in page.frames:
                 try:
-                    page.wait_for_selector(sel, timeout=5_000)
-                    result_locator = page.locator(sel).first
-                    log.info(f"Found result after Enter with selector: {sel}")
-                    break
-                except PWTimeout:
+                    frame.wait_for_selector(sel, timeout=3_000)
+                    candidate = frame.locator(sel).first
+                    text = candidate.inner_text()
+                    if ADDRESS_SEARCH.split()[0].lower() in text.lower() or "redhill" in text.lower():
+                        result_locator = candidate
+                        log.info(f"Found address result '{text}' with: {sel} in frame {frame.url}")
+                        break
+                except (PWTimeout, Exception):
                     continue
+            if result_locator:
+                break
 
         if not result_locator:
-            page.screenshot(path="debug_after_search.png", full_page=True)
-            raise RuntimeError("Could not find address results - check debug_after_search.html")
+            raise RuntimeError("Could not find address in results - check debug artifacts")
 
         result_text = result_locator.inner_text()
-        log.info(f"Clicking result: {result_text.strip()}")
+        log.info(f"Clicking: {result_text.strip()}")
         result_locator.click()
         page.wait_for_timeout(4_000)
 
-        # -- Save post-selection debug
         page.screenshot(path="debug_after_select.png", full_page=True)
         with open("debug_after_select.html", "w", encoding="utf-8") as f:
             f.write(page.content())
@@ -122,7 +172,6 @@ def fetch_bin_info():
         content = page.locator("body").inner_text()
         log.info("=== PAGE TEXT AFTER SELECTION (first 2000 chars) ===")
         log.info(content[:2000])
-        log.info("=====================================================")
 
         browser.close()
 
