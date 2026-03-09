@@ -45,176 +45,152 @@ def fetch_bin_info():
             log.info("No cookie banner.")
 
         # Get the isl-fusion iframe
-        log.info("Looking for isl-fusion iframe...")
-        iframe_element = page.locator(f"iframe[src*='{IFRAME_URL}']").first
-        iframe_element.wait_for(state="attached", timeout=15_000)
-        frame = page.frame(url=f"**{IFRAME_URL}**")
-
-        if not frame:
-            # fallback - get by name
-            frame = page.frame(name="iFrameResizer0")
-
+        frame = page.frame(url=f"**{IFRAME_URL}**") or page.frame(name="iFrameResizer0")
         if not frame:
             raise RuntimeError("Could not find isl-fusion iframe")
-
         log.info(f"Found iframe: {frame.url}")
 
-        # Wait for input inside iframe
+        # Wait for and fill search input
         frame.wait_for_selector("input", timeout=15_000)
-
-        # Log all inputs in iframe
-        inputs = frame.locator("input").all()
-        log.info(f"Inputs in iframe: {len(inputs)}")
-        for i, inp in enumerate(inputs):
-            log.info(f"  [{i}] type={inp.get_attribute('type')} "
-                     f"id={inp.get_attribute('id')} "
-                     f"name={inp.get_attribute('name')} "
-                     f"placeholder={inp.get_attribute('placeholder')}")
-
-        # Log iframe HTML for reference
-        iframe_html = frame.content()
-        log.info("=== IFRAME HTML (first 2000 chars) ===")
-        log.info(iframe_html[:2000])
-        log.info("======================================")
-
-        # Fill the search input
         search_input = frame.locator("input").first
         search_input.click()
         search_input.fill(ADDRESS_SEARCH)
-        log.info(f"Typed into iframe: {ADDRESS_SEARCH}")
+        log.info(f"Typed: {ADDRESS_SEARCH}")
+        page.wait_for_timeout(2_000)
+
+        # Click the Search button inside the iframe
+        try:
+            search_btn = frame.locator("button:has-text('Search'), input[type='submit'], button[type='submit']").first
+            search_btn.click()
+            log.info("Clicked Search button.")
+        except Exception:
+            search_input.press("Enter")
+            log.info("Pressed Enter.")
+
         page.wait_for_timeout(3_000)
 
-        # Save debug screenshot
-        page.screenshot(path="debug_after_search.png", full_page=True)
-        with open("debug_after_search.html", "w", encoding="utf-8") as f:
-            f.write(frame.content())
-
-        iframe_text = frame.locator("body").inner_text()
-        log.info("=== IFRAME TEXT AFTER TYPING (first 2000 chars) ===")
-        log.info(iframe_text[:2000])
-        log.info("===================================================")
-
-        # Look for address suggestions inside iframe
+        # Look for address result inside iframe
         result_selectors = [
-            "[class*='autocomplete'] li",
-            "[class*='suggestion']",
-            "[class*='result'] li",
-            "[class*='dropdown'] li",
-            "[role='listbox'] [role='option']",
-            "[role='option']",
-            "ul li",
-            "select option:not([value=''])",
-            "li",
+            "a", "li", "[class*='result']", "[class*='address']",
+            "[class*='suggestion']", "[role='option']",
         ]
 
         result_locator = None
         for sel in result_selectors:
             try:
-                frame.wait_for_selector(sel, timeout=5_000)
+                frame.wait_for_selector(sel, timeout=4_000)
                 candidates = frame.locator(sel).all()
                 for c in candidates:
                     text = c.inner_text().strip()
-                    if text and ("redhill" in text.lower() or ADDRESS_SEARCH.split()[0].lower() in text.lower()):
+                    if "redhill" in text.lower():
                         result_locator = c
-                        log.info(f"Found address result '{text}' with selector: {sel}")
+                        log.info(f"Found address result '{text}' with: {sel}")
                         break
                 if result_locator:
                     break
-            except PWTimeout:
+            except (PWTimeout, Exception):
                 continue
 
         if not result_locator:
-            # Try pressing Enter and checking again
-            log.info("No dropdown yet, pressing Enter...")
-            search_input.press("Enter")
-            page.wait_for_timeout(3_000)
-
-            page.screenshot(path="debug_after_enter.png", full_page=True)
-            with open("debug_after_enter.html", "w", encoding="utf-8") as f:
-                f.write(frame.content())
-
-            iframe_text = frame.locator("body").inner_text()
-            log.info("=== IFRAME TEXT AFTER ENTER ===")
-            log.info(iframe_text[:3000])
-
-            for sel in result_selectors:
-                try:
-                    frame.wait_for_selector(sel, timeout=5_000)
-                    candidates = frame.locator(sel).all()
-                    for c in candidates:
-                        text = c.inner_text().strip()
-                        if text and ("redhill" in text.lower() or ADDRESS_SEARCH.split()[0].lower() in text.lower()):
-                            result_locator = c
-                            log.info(f"Found address result '{text}' with: {sel}")
-                            break
-                    if result_locator:
-                        break
-                except PWTimeout:
-                    continue
-
-        if not result_locator:
-            raise RuntimeError("Could not find address in dropdown - check debug artifacts")
+            page.screenshot(path="debug_after_search.png", full_page=True)
+            raise RuntimeError("Could not find address in results")
 
         result_text = result_locator.inner_text().strip()
-        log.info(f"Clicking: {result_text}")
         result_locator.click()
+        log.info(f"Clicked: {result_text}")
         page.wait_for_timeout(4_000)
 
-        # Save post-selection debug
+        # Save debug files
         page.screenshot(path="debug_after_select.png", full_page=True)
         with open("debug_after_select.html", "w", encoding="utf-8") as f:
             f.write(frame.content())
 
         content = frame.locator("body").inner_text()
         log.info("=== IFRAME TEXT AFTER SELECTION ===")
-        log.info(content[:3000])
+        log.info(content[:2000])
         log.info("====================================")
 
         browser.close()
 
     return _parse_bin_info(content, result_text)
 
+
 def _parse_bin_info(content, address):
+    """
+    Expected format after 'Next Collections':
+        Wednesday 11th March
+        BrownBin
+        RecycleBin
+        Wednesday 18th March
+        ResidualBin
+    We want only the FIRST date block.
+    """
     result = {"address": address, "date": "Unknown", "bins": []}
-    date_pattern = re.compile(
-        r"(Wednesday[\s,]+\d{1,2}\s+\w+\s+\d{4}|"
-        r"Wed\s+\d{1,2}\s+\w+\s+\d{4}|"
-        r"\d{1,2}\s+\w+\s+\d{4})",
-        re.IGNORECASE
-    )
-    for line in content.splitlines():
-        m = date_pattern.search(line)
-        if m:
-            result["date"] = m.group(0).strip()
+
+    lines = [l.strip() for l in content.splitlines() if l.strip()]
+
+    # Find 'Next Collections' and parse what follows
+    date_pattern = re.compile(r"^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday).+\d{4}$", re.IGNORECASE)
+    bin_pattern  = re.compile(r"^(BrownBin|RecycleBin|ResidualBin)$", re.IGNORECASE)
+
+    try:
+        start = next(i for i, l in enumerate(lines) if "Next Collections" in l)
+    except StopIteration:
+        log.warning("'Next Collections' not found in page text")
+        return result
+
+    # First date line after 'Next Collections'
+    first_date_idx = None
+    for i in range(start + 1, len(lines)):
+        if date_pattern.match(lines[i]):
+            first_date_idx = i
+            result["date"] = lines[i]
             break
-    bin_keywords = {
-        "BrownBin":    ["brown bin", "brownbin", "brown"],
-        "RecycleBin":  ["recycle bin", "recyclebin", "recycling bin", "blue bin"],
-        "ResidualBin": ["residual bin", "residualbin", "general waste", "black bin", "residual"],
-    }
-    content_lower = content.lower()
-    for bin_name, keywords in bin_keywords.items():
-        for kw in keywords:
-            if kw in content_lower:
-                result["bins"].append(bin_name)
-                break
-    result["bins"] = list(dict.fromkeys(result["bins"]))
+
+    if first_date_idx is None:
+        log.warning("No date found after 'Next Collections'")
+        return result
+
+    # Collect bin names immediately following the first date, until next date or end
+    for i in range(first_date_idx + 1, len(lines)):
+        if date_pattern.match(lines[i]):
+            break  # hit the next collection date, stop
+        if bin_pattern.match(lines[i]):
+            result["bins"].append(lines[i])
+
     log.info(f"Parsed -> date: {result['date']}, bins: {result['bins']}")
     return result
+
 
 def send_email(info):
     today = datetime.now().strftime("%A %d %B %Y")
     bins_html = "".join(
-        f"<li>{get_bin_emoji(b)} <strong>{b}</strong></li>" for b in info["bins"]
+        f"<li style='padding:4px 0;font-size:1.1em;'>{get_bin_emoji(b)} <strong>{b}</strong></li>"
+        for b in info["bins"]
     ) or "<li>Could not determine bin type -- check website manually.</li>"
+
     html_body = f"""
     <html><body style="font-family:Arial,sans-serif;max-width:500px;margin:0 auto;padding:20px;">
-      <h2>Bin Collection Reminder</h2>
-      <p>Checked: <strong>{today}</strong></p>
-      <p><strong>Address:</strong> {info["address"]}</p>
-      <p><strong>Next collection:</strong> {info["date"]}</p>
-      <p><strong>Put out tonight:</strong></p>
-      <ul>{bins_html}</ul>
+      <h2 style="color:#2d6a4f;">Bin Collection Reminder</h2>
+      <p style="color:#555;">Checked: <strong>{today}</strong></p>
+      <table style="border-collapse:collapse;width:100%;">
+        <tr><td style="padding:8px;background:#f0f4f0;border-radius:6px;">
+          <strong>Address</strong><br>{info["address"]}
+        </td></tr>
+        <tr><td style="height:10px;"></td></tr>
+        <tr><td style="padding:8px;background:#e8f5e9;border-radius:6px;">
+          <strong>Next collection</strong><br>
+          <span style="font-size:1.2em;color:#1b5e20;">{info["date"]}</span>
+        </td></tr>
+        <tr><td style="height:10px;"></td></tr>
+        <tr><td style="padding:8px;background:#fff3e0;border-radius:6px;">
+          <strong>Put out tonight:</strong>
+          <ul style="margin:8px 0 0 0;padding-left:20px;">{bins_html}</ul>
+        </td></tr>
+      </table>
+      <p style="font-size:0.8em;color:#aaa;margin-top:24px;">
+        Auto-generated -- <a href="{COUNCIL_URL}">Lisburn &amp; Castlereagh Council</a>
+      </p>
     </body></html>
     """
     msg = MIMEMultipart("alternative")
