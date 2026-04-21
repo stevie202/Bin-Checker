@@ -2,29 +2,62 @@ name: Bin Collection Checker
 
 on:
   schedule:
-    - cron: '30 18 * * 2'
+    - cron: '0 15 * * 2'   # 15:00 UTC = 16:00 BST
+    - cron: '0 16 * * 2'   # 16:00 UTC = 17:00 BST
+    - cron: '0 17 * * 2'   # 17:00 UTC = 18:00 BST
+    - cron: '0 18 * * 2'   # 18:00 UTC = 19:00 BST
   workflow_dispatch:
+
+# Only one run at a time. If a second trigger fires while one is running,
+# it queues and then the guard step skips it if the first already succeeded.
+concurrency:
+  group: bin-checker-weekly
+  cancel-in-progress: false
 
 jobs:
   check-bins:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Check if already ran today
+        id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TODAY=$(date -u +%Y-%m-%d)
+          COUNT=$(gh run list \
+            --repo ${{ github.repository }} \
+            --workflow bin_checker.yml \
+            --status success \
+            --limit 20 \
+            --json startedAt \
+            --jq "[.[] | select(.startedAt | startswith(\"$TODAY\"))] | length")
+          echo "Successful runs today: $COUNT"
+          if [ "$COUNT" -gt "0" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Checkout code
+        if: steps.guard.outputs.skip == 'false'
         uses: actions/checkout@v4
 
       - name: Set up Python
+        if: steps.guard.outputs.skip == 'false'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install dependencies
+        if: steps.guard.outputs.skip == 'false'
         run: |
           pip install playwright schedule
           playwright install chromium
           playwright install-deps chromium
 
       - name: Run bin checker
+        if: steps.guard.outputs.skip == 'false'
         env:
           EMAIL_FROM:     ${{ secrets.EMAIL_FROM }}
           EMAIL_TO:       ${{ secrets.EMAIL_TO }}
@@ -33,13 +66,11 @@ jobs:
         run: python bin_checker.py
 
       - name: Upload debug artifacts
-        if: always()
+        if: steps.guard.outputs.skip == 'false' && always()
         uses: actions/upload-artifact@v4
         with:
           name: debug-screenshots
           path: |
-            debug_initial.png
-            debug_initial.html
             debug_after_search.png
             debug_after_search.html
             debug_after_select.png
